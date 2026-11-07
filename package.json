@@ -1,0 +1,75 @@
+{
+  "name": "@firemq/client",
+  "version": "0.1.0",
+  "description": "TypeScript client for FireMQ over the native FireMQ protocol (TCP, TLS and WebSocket)",
+  "license": "Apache-2.0",
+  "author": "FireMQ",
+  "homepage": "https://github.com/FireMQ/firemq-js#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FireMQ/firemq-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/FireMQ/firemq-js/issues"
+  },
+  "keywords": [
+    "firemq",
+    "messaging",
+    "queue",
+    "amqp",
+    "rabbitmq",
+    "websocket"
+  ],
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "browser": {
+    "./dist/esm/index.js": "./dist/esm/browser.js",
+    "./dist/cjs/index.js": "./dist/cjs/browser.js"
+  },
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/esm/browser.d.ts",
+        "default": "./dist/esm/browser.js"
+      },
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node scripts/clean.mjs dist && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/cjs-package.mjs",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "pretest": "node scripts/clean.mjs .build-test && tsc -p tsconfig.test.json",
+    "test": "node --test .build-test/test/unit/*.test.js",
+    "pretest:integration": "npm run pretest",
+    "test:integration": "node --test .build-test/test/integration/*.test.js",
+    "conformance": "firemq-conformance run --driver \"node conformance/driver.mjs\"",
+    "prepublishOnly": "npm run lint && npm run build"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.3"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.130",
+    "typescript": "^7.0.2"
+  }
+}
