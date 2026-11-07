@@ -6,9 +6,12 @@
 // stdout, in order. Logs go to stderr.
 //
 // Set FIREMQ_DRIVER_TRANSPORT=ws to run every scenario over WebSocket instead of TCP. The
-// runner only hands out a fire:// URL, so the driver finds the broker's HTTP port by trying
-// the ports next to the fire:// port (or uses FIREMQ_DRIVER_WS_PORT when set).
+// runner only hands out a fire:// URL, so the driver looks for the broker's HTTP port among
+// the ports the runner process listens on, and tries the one that answers a FireMQ WebSocket
+// handshake. Set FIREMQ_DRIVER_WS_PORT to skip the search.
 
+import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 import {
@@ -107,6 +110,74 @@ function need() {
 
 let wsPort = process.env.FIREMQ_DRIVER_WS_PORT ? Number(process.env.FIREMQ_DRIVER_WS_PORT) : undefined;
 
+/** The driver's parent and grandparent: the runner, or a shell the runner started. */
+function ancestorPids() {
+  const pids = [process.ppid];
+  try {
+    const stat = readFileSync(`/proc/${process.ppid}/stat`, 'utf8');
+    pids.push(Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]));
+  } catch {
+    try {
+      pids.push(Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(process.ppid)], { encoding: 'utf8' }).trim()));
+    } catch {
+      // no ps
+    }
+  }
+  return pids.filter((pid) => pid > 1);
+}
+
+/** TCP ports a process listens on: from /proc on Linux, from lsof elsewhere. */
+function listeningPorts(pid) {
+  try {
+    const inodes = new Set();
+    for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+      try {
+        const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`));
+        if (m) inodes.add(m[1]);
+      } catch {
+        // closed meanwhile
+      }
+    }
+    const ports = [];
+    for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+      let text = '';
+      try {
+        text = readFileSync(table, 'utf8');
+      } catch {
+        continue;
+      }
+      for (const line of text.split('\n').slice(1)) {
+        const cols = line.trim().split(/\s+/);
+        // cols[1] is local address:port in hex, cols[3] the state (0A = LISTEN), cols[9] the inode.
+        if (cols.length > 9 && cols[3] === '0A' && inodes.has(cols[9])) ports.push(parseInt(cols[1].split(':')[1], 16));
+      }
+    }
+    return ports;
+  } catch {
+    // not Linux
+  }
+  try {
+    const out = execFileSync('lsof', ['-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN', '-P', '-n', '-Fn'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return [...out.matchAll(/^n.*:(\d+)$/gm)].map((m) => Number(m[1]));
+  } catch {
+    return [];
+  }
+}
+
+/** True when a FireMQ WebSocket endpoint answers on the port, even if it refuses guest. */
+async function isWebSocketPort(host, port) {
+  try {
+    const probe = await connect(`ws://${host}:${port}/fire`, { connectTimeout: 2000, heartbeat: 0 });
+    await probe.close();
+    return true;
+  } catch (e) {
+    return e instanceof ServerError;
+  }
+}
+
 /** Turns the runner's fire:// URL into a ws:// URL on the broker's HTTP port. */
 async function wsUrlFor(fireUrl) {
   const u = new URL(fireUrl);
@@ -116,21 +187,18 @@ async function wsUrlFor(fireUrl) {
   const build = (port) => `ws://${creds}${u.hostname}:${port}/fire${query}`;
   if (wsPort !== undefined) return build(wsPort);
   const base = Number(u.port || 5673);
-  for (const port of [base + 1, base - 1, base + 2, base - 2]) {
-    try {
-      // Guest credentials only to find the port; the real connect uses the runner's URL.
-      const probe = await connect(`ws://${u.hostname}:${port}/fire`, { connectTimeout: 2000, heartbeat: 0 });
-      await probe.close();
+  const candidates = new Set();
+  for (const pid of ancestorPids()) for (const port of listeningPorts(pid)) candidates.add(port);
+  for (const port of [base + 1, base + 2, base - 1, base - 2]) candidates.add(port);
+  candidates.delete(base);
+  console.error(`driver: looking for the WebSocket port among ${[...candidates].join(', ')}`);
+  for (const port of candidates) {
+    if (await isWebSocketPort(u.hostname, port)) {
       wsPort = port;
       return build(port);
-    } catch (e) {
-      if (e instanceof ServerError) {
-        wsPort = port;
-        return build(port);
-      }
     }
   }
-  throw new Error(`no FireMQ WebSocket endpoint next to port ${base}`);
+  throw new Error(`no FireMQ WebSocket endpoint found; tried ports ${[...candidates].join(', ')}`);
 }
 
 const handlers = {
