@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, unit tests and build (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  integration:
+    name: Conformance, integration tests and examples (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Node 20 has no global WebSocket, so ws:// runs on the built-in client there.
+        node: [20, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      # The broker and the conformance runner. The ref moves to `main` once
+      # FireMQ/firemq#38 merges.
+      - uses: actions/checkout@v4
+        with:
+          repository: FireMQ/firemq
+          ref: b90a2ff9bda15a398c6957bfb291e4a9db9957ab
+          path: firemq
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firemq
+      - name: Build firemq and firemq-conformance
+        working-directory: firemq
+        run: cargo build -p firemq -p firemq-conformance
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: Conformance suite over TCP
+        run: firemq/target/debug/firemq-conformance run --driver "node conformance/driver.mjs"
+      - name: Conformance suite over WebSocket
+        env:
+          FIREMQ_DRIVER_TRANSPORT: ws
+        run: firemq/target/debug/firemq-conformance run --driver "node conformance/driver.mjs"
+
+      - name: Start firemq
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+            -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem"
+          firemq/target/debug/firemq --ephemeral \
+            --tls-cert "$RUNNER_TEMP/cert.pem" --tls-key "$RUNNER_TEMP/key.pem" \
+            > "$RUNNER_TEMP/firemq.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/firemq.pid"
+          for port in 5673 5674 15672; do
+            for i in $(seq 1 60); do
+              (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null && break
+              sleep 0.5
+            done
+          done
+          cat "$RUNNER_TEMP/firemq.log"
+
+      - name: Integration tests
+        env:
+          FIREMQ_URL: fire://localhost:5673
+          FIREMQ_WS_URL: ws://localhost:15672/fire
+          FIREMQ_TLS_URL: fires://localhost:5674
+          FIREMQ_TLS_CA: ${{ runner.temp }}/cert.pem
+          FIREMQ_TLS_CERT: ${{ runner.temp }}/cert.pem
+          FIREMQ_TLS_KEY: ${{ runner.temp }}/key.pem
+        run: npm run test:integration
+
+      - name: Examples over TCP
+        env:
+          FIREMQ_URL: fire://localhost:5673
+        run: |
+          for example in examples/*.mjs; do
+            echo "== $example"
+            timeout 30 node "$example"
+          done
+      - name: Examples over WebSocket
+        env:
+          FIREMQ_URL: ws://localhost:15672/fire
+        run: |
+          for example in examples/*.mjs; do
+            echo "== $example"
+            timeout 30 node "$example"
+          done
+
+      - name: Broker log
+        if: failure()
+        run: cat "$RUNNER_TEMP/firemq.log" || true
+      - name: Stop firemq
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/firemq.pid")" 2>/dev/null || true

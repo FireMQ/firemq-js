@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FireMQ in the browser</title>
+  <!--
+    Run from the repository root:
+
+      npm install && npm run build
+      python3 -m http.server 8080
+
+    then open http://localhost:8080/examples/browser.html with a broker running on this
+    machine (its WebSocket endpoint is ws://localhost:15672/fire by default).
+
+    In an application, install @firemq/client and let your bundler resolve it; bundlers pick
+    the browser build, which only speaks ws:// and wss://. The import map below does the same
+    job without a bundler.
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "@firemq/client": "../dist/esm/browser.js",
+        "@msgpack/msgpack": "../node_modules/@msgpack/msgpack/dist.esm/index.mjs"
+      }
+    }
+  </script>
+  <style>
+    body { font: 15px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+    input, button { font: inherit; padding: 0.3rem 0.5rem; }
+    input { width: 100%; box-sizing: border-box; margin-bottom: 0.5rem; }
+    #log { background: #f4f4f4; padding: 0.75rem; min-height: 8rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>FireMQ in the browser</h1>
+  <label>Broker URL <input id="url" value="ws://localhost:15672/fire"></label>
+  <button id="connect">Connect</button>
+  <p>
+    <input id="text" value="Hello from the browser!" disabled>
+    <button id="send" disabled>Publish</button>
+  </p>
+  <pre id="log"></pre>
+
+  <script type="module">
+    import { connect, QueueOptions } from '@firemq/client';
+
+    const $ = (id) => document.getElementById(id);
+    const log = (line) => ($('log').textContent += line + '\n');
+    let client;
+    let queue;
+
+    $('connect').onclick = async () => {
+      $('connect').disabled = true;
+      try {
+        client = await connect($('url').value);
+        log(`connected to ${client.server.name} ${client.server.version} as ${client.server.connectionId}`);
+
+        // A queue that lives as long as this page's connection.
+        ({ name: queue } = await client.declareQueue('', QueueOptions.temporary()));
+        log(`declared ${queue}`);
+
+        const sub = await client.subscribe(queue);
+        (async () => {
+          for await (const msg of sub) {
+            log(`received: ${msg.text()}`);
+            msg.ack();
+          }
+        })().catch((e) => log(`subscription ended: ${e.message}`));
+
+        client.closed.then((reason) => log(reason.message));
+        $('text').disabled = $('send').disabled = false;
+      } catch (e) {
+        log(`error: ${e.message}`);
+        $('connect').disabled = false;
+      }
+    };
+
+    $('send').onclick = async () => {
+      try {
+        await client.publish('', queue, $('text').value);
+        log(`published: ${$('text').value}`);
+      } catch (e) {
+        log(`error: ${e.message}`);
+      }
+    };
+  </script>
+</body>
+</html>
