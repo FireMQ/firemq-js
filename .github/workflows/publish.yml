@@ -1,11 +1,18 @@
 name: Publish
 
-# Publishes to npm when a version tag such as v0.1.0 is pushed. Skipped until the
-# repository has an NPM_TOKEN secret.
+# Publishes to npm when a version tag such as v0.1.0 is pushed. To publish a tag that
+# already exists, run the workflow by hand and pass the tag. Skipped until the repository
+# has an NPM_TOKEN secret.
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish, for example v0.1.0
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -36,8 +43,13 @@ jobs:
     permissions:
       contents: read
       id-token: write # npm provenance
+    env:
+      # The pushed tag, or the tag passed to a manual run.
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -45,10 +57,26 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Check that the tag matches package.json
-        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match the version $version in package.json"
+            exit 1
+          fi
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      - run: npm publish --access public --provenance
+      # npm provenance names the commit and ref the run started from (GITHUB_SHA and
+      # GITHUB_REF), not the checked-out tag. A manual run started from a branch would
+      # attest the wrong commit, so it publishes without provenance. Start the manual run
+      # from the tag ("Use workflow from") to keep provenance.
+      - name: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ "$GITHUB_REF" = "refs/tags/$TAG" ]; then
+            npm publish --access public --provenance
+          else
+            echo "::notice::Publishing $TAG without provenance because the run started from $GITHUB_REF, not refs/tags/$TAG"
+            npm publish --access public
+          fi
