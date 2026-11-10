@@ -1,8 +1,13 @@
 name: Publish
 
 # Publishes to npm when a version tag such as v0.1.0 is pushed. To publish a tag that
-# already exists, run the workflow by hand and pass the tag. Skipped until the repository
-# has an NPM_TOKEN secret.
+# already exists, run the workflow by hand and pass the tag.
+#
+# Authenticates with npm trusted publishing (GitHub OIDC), so the repository stores no npm
+# token. The trusted publisher in the npm package settings names organization FireMQ,
+# repository firemq-js and workflow publish.yml, and allows `npm publish`. npm expires a
+# new trusted publisher that hasn't published within 2 days of being added; if the package
+# settings show it as expired, delete it and add it again before releasing.
 
 on:
   push:
@@ -18,31 +23,12 @@ permissions:
   contents: read
 
 jobs:
-  token:
-    name: Check for NPM_TOKEN
-    runs-on: ubuntu-latest
-    outputs:
-      present: ${{ steps.check.outputs.present }}
-    steps:
-      - id: check
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -n "$NPM_TOKEN" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::NPM_TOKEN is not set; skipping npm publish"
-          fi
-
   publish:
     name: npm publish
-    needs: token
-    if: needs.token.outputs.present == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # npm provenance
+      id-token: write # npm trusted publishing and provenance
     env:
       # The pushed tag, or the tag passed to a manual run.
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -50,11 +36,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: refs/tags/${{ env.TAG }}
+      # No dependency cache: a release build installs from the lockfile only.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-          cache: npm
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@^11.5.1
       - run: npm ci
       - name: Check that the tag matches package.json
         run: |
@@ -68,15 +56,14 @@ jobs:
       - run: npm run build
       # npm provenance names the commit and ref the run started from (GITHUB_SHA and
       # GITHUB_REF), not the checked-out tag. A manual run started from a branch would
-      # attest the wrong commit, so it publishes without provenance. Start the manual run
-      # from the tag ("Use workflow from") to keep provenance.
+      # attest the wrong commit, so it publishes without provenance; trusted publishing adds
+      # provenance by default, so that run turns it off. Start the manual run from the tag
+      # ("Use workflow from") to keep provenance.
       - name: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ "$GITHUB_REF" = "refs/tags/$TAG" ]; then
             npm publish --access public --provenance
           else
             echo "::notice::Publishing $TAG without provenance because the run started from $GITHUB_REF, not refs/tags/$TAG"
-            npm publish --access public
+            NPM_CONFIG_PROVENANCE=false npm publish --access public
           fi
